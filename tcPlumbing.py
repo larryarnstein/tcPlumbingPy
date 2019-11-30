@@ -1,6 +1,6 @@
 #copyright all rights reserved Lawrence Arnstein 2019
 #other components, connectivity, undo/redo, pressure modeling, impellers, etc.
-#todo: timer for handles, copy-paste, springs,name ports, github
+#todo: timer for handles, springs,name ports, abstract, select conflict with menu...disable mouse effects when in menu
 import os, sys
 import pygame
 import pygame.gfxdraw
@@ -25,28 +25,43 @@ currentHandle = None
 currentImpeller = None
 
 pygame.init()
-screen = pygame.display.set_mode((900, 600))
+screen_w = 1200
+screen_h = 700
+ui_width = 160
+ui_height = 20
+ui_space = 30
+screen = pygame.display.set_mode((screen_w, screen_h))
 pygame.display.set_caption('tcPlumbing')
 pygame.mouse.set_visible(1)
 
-manager = pg.UIManager((800, 600))
-new_button = pg.elements.UIButton(relative_rect=pygame.Rect((760,10), (120, 20)),
+manager = pg.UIManager((1200, 700))
+new_button = pg.elements.UIButton(relative_rect=pygame.Rect((screen_w-ui_width-10,10), (ui_width, ui_height)),
                                             text='New',
                                             manager=manager)
-module_name = pg.elements.UITextEntryLine(relative_rect=pygame.Rect((20,10), (120, 20)),
+module_name = pg.elements.UITextEntryLine(relative_rect=pygame.Rect((10,10), (ui_width, ui_height)),
                                             manager=manager)
+speed_slider = pg.elements.UIHorizontalSlider(relative_rect=pygame.Rect((screen_w-ui_width-10,10+ui_space),(ui_width, ui_height)),value_range=tuple((0.05,0.9)),manager=manager,start_value=0.9)
 module_list = None
+commands = ["duplicate      d","rotate         r","flip           f","copy           c","paste          v","grow           g","shrink         s"]
+command_list = pg.elements.UIDropDownMenu(options_list=commands, starting_option = "Commands", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,100),(ui_width, ui_height)))
 
-speed_slider = pg.elements.UIHorizontalSlider(relative_rect=pygame.Rect((760,40),(120,20)),value_range=tuple((0.05,0.9)),manager=manager,start_value=0.9)
+gui_elements = []
+gui_elements.append(module_name)
+gui_elements.append(command_list)
+gui_elements.append(new_button)
+gui_elements.append(speed_slider)
 
 def buildModuleMenu() :
     global module_list
-    if module_list is not None : module_list.kill()
+    if module_list is not None :
+        module_list.kill()
+        gui_elements.remove(module_list)
     mods = []
     for file in os.listdir("projects"):
         if file.endswith(".json"):
             mods.append(file.split('.')[0])
-    module_list = pg.elements.UIDropDownMenu(options_list=mods, starting_option = "Choose", manager=manager,relative_rect=pygame.Rect((760,70),(120,20)))
+    module_list = pg.elements.UIDropDownMenu(options_list=mods, starting_option = "Load", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,70),(ui_width, ui_height)))
+    gui_elements.append(module_list)
 
 buildModuleMenu()
 
@@ -68,14 +83,16 @@ def load_image(name, colorkey=None):
 #        image.set_colorkey(colorkey, pygame.RLEACCEL)
     return image, image.get_rect()
 
-class Module() :
+class Module(pygame.sprite.Sprite) :
     def __init__(self):
+        pygame.sprite.Sprite.__init__(self)
         self.pipes = pygame.sprite.RenderPlain()
         self.ports = pygame.sprite.RenderPlain()
         self.handles = pygame.sprite.RenderPlain()
         self.changeQueue = []
         self.connections = []
         self.impellers = pygame.sprite.RenderPlain()
+        self.labels = pygame.sprite.RenderPlain()
         self.changed = False;
 
     def addQueue(self, c):
@@ -90,6 +107,10 @@ class Module() :
         self.impellers.add(imp)
         self.changed = True
 
+    def addLabel(self, l) :
+        self.labels.add(l)
+        self.changed = True
+
     def removePipe(self,p):
         self.pipes.remove(p)
         self.handles.remove(p.handle)
@@ -97,6 +118,7 @@ class Module() :
         self.ports.remove(p.outPort)
         self.ports.remove(p.ctlPort)
         self.impellers.remove(p.impeller)
+        self.labels.remove(p.label)
         self.changed = True
 
     def addHandle(self, h):
@@ -202,6 +224,8 @@ pygame.gfxdraw.filled_trigon(disconnectedOutPort,0,0,0,halfGuage,halfGuage,int(h
 ghostOutPort = pygame.Surface((halfGuage+1,halfGuage+1), pygame.SRCALPHA)
 pygame.gfxdraw.aatrigon(ghostOutPort,0,0,0,halfGuage,halfGuage,int(halfGuage/2),pygame.Color(128,128,128))
 
+invisibleDecoration = pygame.Surface((halfGuage+1,halfGuage+1), pygame.SRCALPHA)
+
 MAXPRESSURE = 255
 MAXFLOW = 0.5
 def scalarToColor(p) :
@@ -215,6 +239,31 @@ def equalizePressure(p1,p2,aperture) :
     if deltap > 0 and newp > (0.9 * MAXPRESSURE): newp = MAXPRESSURE
     if deltap < 0 and newp < (0.1 * MAXPRESSURE): newp = 0
     return newp
+
+class Label(pygame.sprite.Sprite) :
+    def __init__(self, pipe):
+        pygame.sprite.Sprite.__init__(self)
+        self.pipe = pipe
+        pipe.module.addLabel(self)
+
+    def update(self, *args) :
+        center = tuple(map(add, self.pipe.rect.center, (0, -guage)))
+        if self.pipe.angle == 1 :
+            center = tuple(map(add, self.pipe.rect.center, (guage, 0)))
+        if self.pipe.angle == 2 :
+            center = tuple(map(add, self.pipe.rect.center, (0, guage)))
+        if self.pipe.angle == 3 :
+            center = tuple(map(add, self.pipe.rect.center, (-guage, 0)))
+
+        self.font = pygame.font.SysFont("Arial", 14)
+        self.textSurf = self.font.render(self.pipe.name, True, pygame.Color(255,255,255), None)
+        self.image = pygame.Surface((160, 20), pygame.SRCALPHA)
+        W = self.textSurf.get_width()
+        H = self.textSurf.get_height()
+        self.image.blit(self.textSurf, [0,0])
+        self.rect = self.image.get_bounding_rect()
+        self.rect.center = center
+
 
 MAXRATE = 30
 class Impeller(pygame.sprite.Sprite) :
@@ -333,12 +382,13 @@ class OutPort(Port) :
         self.rect.center = self.pipe.rect.center
 
 class Handle(pygame.sprite.Sprite):
-    def __init__(self, p):
-       pygame.sprite.Sprite.__init__(self)
-       self.pipe = p
-       self.image = ghostHandle
-       self.rect = self.image.get_bounding_rect()
-       self.rect.center = self.pipe.rect.center
+    def __init__(self, p) :
+        pygame.sprite.Sprite.__init__(self)
+        self.pipe = p
+        self.image = ghostHandle
+        self.rect = self.image.get_bounding_rect()
+        self.rect.center = self.pipe.rect.center
+        self.name = ""
 
     def move(self,delta):
         self.pipe.move(delta,self)
@@ -363,6 +413,8 @@ class Handle(pygame.sprite.Sprite):
         self.rect.center = self.pipe.rect.center
 
 nextID = 0
+decorationsVisible = True
+
 class Pipe(pygame.sprite.Sprite):
     def __init__(self,m,x,y) : # call Sprite intializer
         global nextID
@@ -388,9 +440,23 @@ class Pipe(pygame.sprite.Sprite):
         self.changed = True
         self.inPressure = self.outPressure = 0
         self.impeller = None
+        self.label = None
+        self.name = ""
         m.addHandle(self.handle)
         m.addPort(self.inPort)
         m.addPort(self.outPort)
+
+    def turnOffDecorations(self):
+        if self.inPort : self.inPort.image = invisibleDecoration
+        if self.outPort : self.outPort.image = invisibleDecoration
+        if self.ctlPort : self.ctlPort.image = invisibleDecoration
+        if not self.selected : self.handle.image = invisibleDecoration
+
+    def turnOnDecorations(self):
+        self.constructImage()
+
+    def setName(self, name):
+        if name != "" : self.name = name
 
     def getPortPressure(self, p):
         if p == self.inPort : return self.inPressure
@@ -532,6 +598,7 @@ class Pipe(pygame.sprite.Sprite):
         m["scale"] = self.sfactor
         m["orientation"] = self.orientation
         m["id"] = self.id
+        m["name"] = self.name
         return m
 
     def loadSerializationMap(self,m,new) :
@@ -542,36 +609,43 @@ class Pipe(pygame.sprite.Sprite):
         self.mirror = m["flip"]
         self.orientation = m["orientation"]
         self.sfactor = m["scale"]
+        if "name" in m.keys() :
+            self.name = m["name"]
         self.selected = False
         if not new :
             self.id = m["id"]
             nextID = max(self.id+1,nextID)
 
-class Tap(Pipe):
+class Tap(Pipe) :
     def __init__(self,m,x,y):
         Pipe.__init__(self,m,x,y)
         self.module.ports.remove(self.inPort)
         self.inPort = None
         self.inPressure = MAXPRESSURE
-        self.impeller = Impeller(self)
-        self._pressure = 0
 
     def transferPressure(self):
-        self.outPressure = self._pressure
+        self.outPressure = self.inPressure
         if self.outPort is not None and self.outPort.connected is not None :
             self.module.addQueue(self.outPort.connected)
 
-    def switch(self):
-        self._pressure = MAXPRESSURE - self._pressure
-        self.changed = True
-
     def addSprites(self):
         img = tap_img.copy()
-        img.fill(scalarToColor(self.outPressure), special_flags=pygame.BLEND_MULT)
+        img.fill(scalarToColor(self.inPressure), special_flags=pygame.BLEND_MULT)
         self.image.blit(img,(0,0))
 
     def scale(self,s):
         pass
+
+class Pump(Tap) :
+    def __init__(self,m,x,y):
+        Tap.__init__(self,m,x,y)
+        self.impeller = Impeller(self)
+        if self.name == "" : self.name = "Input-"+str(self.id)
+        self.label = Label(self)
+
+    def switch(self):
+        self.inPressure = MAXPRESSURE - self.inPressure
+        self.changed = True
 
 class Nozzle(Pipe):
     def __init__(self,m,x,y):
@@ -579,6 +653,8 @@ class Nozzle(Pipe):
         self.module.ports.remove(self.outPort)
         self.outPort = None
         self.impeller = Impeller(self)
+        if self.name == "" : self.name = "Output-"+str(self.id)
+        self.label = Label(self)
 
     def addSprites(self):
         img = nozzle_img.copy()
@@ -587,7 +663,6 @@ class Nozzle(Pipe):
 
     def scale(self,s):
         pass
-
 
 class Bend(Pipe):
     def __init__(self, m, x, y):  # call Sprite intializer
@@ -879,6 +954,28 @@ def onImpeller(point) :
             return (i)
     return None
 
+label_editor = None
+editing_pipe = None
+def onLabel(point) :
+    global label_editor,editing_pipe
+    if currentModule is not None:
+        for i in currentModule.labels :
+            if i.rect.collidepoint(point) :
+                new_rect = pygame.Rect((0, 0), (160, 20))
+                new_rect.center = i.rect.center
+                if label_editor is not None : label_editor.kill()
+                label_editor = pg.elements.UITextEntryLine(new_rect, manager)
+                label_editor.set_text(i.pipe.name)
+                editing_pipe = i.pipe
+                return editing_pipe
+
+def onGUI(point) :
+    global label_editor, editing_pipe
+    for i in manager.get_sprite_group() :
+        if (i.rect.width != screen_w) :
+            if i.rect.collidepoint(point) : return True
+    return False
+
 def moveSelected(deltaPos) :
     for h in currentModule.handles :
         if (h.pipe.selected) : h.move(deltaPos)
@@ -906,14 +1003,15 @@ currentModule = None
 def makeNewModule() :
     m = Module()
     # Pipe(currentModule,200,200)
-    Pipe(m,50,500).constructImage()
-    Teesistor(m,130,500).constructImage()
-    Teeverter(m,210,500).constructImage()
-    Tee(m,290,500).constructImage()
-    Tap(m,370,500).constructImage()
-    Nozzle(m,450,500).constructImage()
-    Bend(m,530,500).constructImage()
-    Join(m,610,500).constructImage()
+    Pipe(m,50,600).constructImage()
+    Teesistor(m,130,600).constructImage()
+    Teeverter(m,210,600).constructImage()
+    Tee(m,290,600).constructImage()
+    Tap(m,370,600).constructImage()
+    Pump(m,450,600).constructImage()
+    Nozzle(m,530,600).constructImage()
+    Bend(m,610,600).constructImage()
+    Join(m,690,600).constructImage()
     return m
 
 def loadModule(name) :
@@ -950,9 +1048,40 @@ classes["Teesistor"] = Teesistor
 classes["Teeverter"] = Teeverter
 classes["Tee"] = Tee
 classes["Tap"] = Tap
+classes["Pump"] = Pump
 classes["Nozzle"] = Nozzle
 classes["Bend"] = Bend
 classes["Join"] = Join
+
+def duplicateSelected() :
+    for h in currentModule.handles :
+            if h.pipe.selected :
+                h.select(False)
+                h.applyGhostHandle()
+                m = h.pipe.getSerializationMap()
+                p = currentModule.loadComponent(m, 2 * guage, 2 * guage)
+                p.handle.select(True)
+
+copyBuffer = []
+pasteCount = 0
+def copySelected() :
+    global copyBuffer, pasteCount
+    copyBuffer = []
+    pasteCount = 0
+    for h in currentModule.handles :
+            if h.pipe.selected :
+                copyBuffer.append(h.pipe.getSerializationMap())
+
+def pasteSelected() :
+    global pasteCount, copyBuffer
+    pasteCount = pasteCount + 1
+    for h in currentModule.handles :
+            if h.pipe.selected :
+                h.select(False)
+                h.applyGhostHandle()
+    for m in copyBuffer :
+                p = currentModule.loadComponent(m, pasteCount * 2 * guage, pasteCount * 2 * guage)
+                p.handle.select(True)
 
 def duplicateSelected() :
     for h in currentModule.handles :
@@ -974,17 +1103,37 @@ def keyMap(key) :
         ord('g'): growSelected,
         ord('s'): shrinkSelected,
         ord('d'): duplicateSelected,
+        ord('c'): copySelected,
+        ord('v'): pasteSelected,
         127: deleteSelected
     }
     func = switcher.get(key, lambda: "unknown command")
     func()
 
+def turnOffDecorations() :
+    global decorationsVisible
+    if currentModule :
+        for p in currentModule.pipes :
+            p.turnOffDecorations()
+            decorationsVisible = False
+
+def turnOnDecorations() :
+    global decorationsVisible
+    if not decorationsVisible and currentModule is not None:
+        for p in currentModule.pipes :
+            p.turnOnDecorations()
+            decorationsVisible = True
 
 selectBox = None
-#currentModule = makeNewModule()
+lastEvent = pygame.time.get_ticks()
+
 while 1:
     time_delta = Clock.tick(60)/1000.0
+    now = pygame.time.get_ticks()
+    if now - lastEvent > 2000: turnOffDecorations()
     for event in pygame.event.get():
+        lastEvent = pygame.time.get_ticks()
+        turnOnDecorations()
         if event.type == pygame.USEREVENT:
             if event.user_type == 'ui_button_pressed':
                 if event.ui_element == new_button:
@@ -994,22 +1143,39 @@ while 1:
                 if event.ui_element == module_list :
                     currentModule = loadModule(module_list.selected_option)
                     module_name.set_text(module_list.selected_option)
-                    #buildModuleMenu()
+                    module_list.selected_option = "Load"
+                elif event.ui_element == command_list :
+                    cmd = ord(command_list.selected_option[-1:])
+                    command_list.selected_option = "Commands"
+                    if currentModule : keyMap(cmd)
             if event.user_type == 'ui_text_entry_finished' :
                 if event.ui_element == module_name :
                     currentModule.save()
                     buildModuleMenu()
-
+                    module_list.selected_option = "Load"
+                if label_editor is not None and event.ui_element == label_editor :
+                    if editing_pipe is not None :
+                        editing_pipe.setName(label_editor.text)
+                        currentModule.changed = True
+                    label_editor.kill()
+                    label_editor = None
+                    editing_pipe = None
         if currentModule is not None :
             if event.type == pygame.QUIT:
                 quit()
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 quit()
-            elif event.type == pygame.MOUSEBUTTONDOWN:
+            elif event.type == pygame.MOUSEBUTTONDOWN and not onGUI(event.pos):
+                pressed1, pressed2, pressed3 = pygame.mouse.get_pressed()
                 downPos = lastPos = event.pos
-                currentHandle = onHandle(downPos)
-                currentImpeller = onImpeller(downPos)
-            elif event.type == pygame.MOUSEMOTION:
+                if pressed1 :
+                    currentHandle = onHandle(downPos)
+                    currentImpeller = onImpeller(downPos)
+                    editing_pipe = onLabel(downPos)
+                    if editing_pipe is None and label_editor is not None :
+                        label_editor.kill()
+                        label_editor = None
+            elif event.type == pygame.MOUSEMOTION and not onGUI(event.pos) :
                 if (currentHandle) :
                     if not currentHandle.pipe.selected and not shiftPressed():
                         for h in currentModule.handles:
@@ -1019,17 +1185,17 @@ while 1:
                     currentHandle.select(True)
                     currentHandle.applySelectedHandle()
                 pressed1, pressed2, pressed3 = pygame.mouse.get_pressed()
-                if (pressed1) :
+                if pressed1 :
                     if currentHandle:
                         moveSelected(tuple(map(sub, event.pos, lastPos)))
                         #lastPos = event.pos
-                    else : selectBox = rectFromTwoPoints(downPos,event.pos)
+                    elif downPos is not None : selectBox = rectFromTwoPoints(downPos,event.pos)
                 else :
                     for h in currentModule.handles :
                         if not h.pipe.selected :
                             if h.rect.collidepoint(event.pos) : h.applyOverHandle()
                             else : h.applyGhostHandle()
-            elif event.type == pygame.MOUSEBUTTONUP:
+            elif event.type == pygame.MOUSEBUTTONUP and not onGUI(event.pos) :
                 if selectBox :
                     for h in currentModule.handles :
                         if h.rect.colliderect(selectBox) :
@@ -1064,11 +1230,13 @@ while 1:
         currentModule.update()
         currentModule.pipes.update()
         currentModule.impellers.update()
+        currentModule.labels.update()
         screen.blit(background, (0, 0))
         currentModule.pipes.draw(screen)
         currentModule.handles.draw(screen)
         currentModule.impellers.draw(screen)
         currentModule.ports.draw(screen)
+        currentModule.labels.draw(screen)
         if selectBox : pygame.gfxdraw.rectangle(screen, selectBox, (255, 255, 255))
     manager.draw_ui(screen)
     pygame.display.flip()
