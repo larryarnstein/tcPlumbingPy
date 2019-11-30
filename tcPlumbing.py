@@ -83,6 +83,10 @@ def load_image(name, colorkey=None):
 #        image.set_colorkey(colorkey, pygame.RLEACCEL)
     return image, image.get_rect()
 
+undo_stack = []
+undo_ix = -1
+suppress_undoable = False
+
 class Module(pygame.sprite.Sprite) :
     def __init__(self):
         pygame.sprite.Sprite.__init__(self)
@@ -158,6 +162,7 @@ class Module(pygame.sprite.Sprite) :
         self.ports = pygame.sprite.RenderPlain()
         self.handles = pygame.sprite.RenderPlain()
         self.impellers = pygame.sprite.RenderPlain()
+        self.labels = pygame.sprite.RenderPlain()
         self.changeQueue = []
         self.connections = []
         components = datastore["components"]
@@ -166,11 +171,24 @@ class Module(pygame.sprite.Sprite) :
         self.changed = True
 
     def update(self):
+        global undo_ix, undo_stack
+        global suppress_undoable
         for p in self.pipes:
             if p.changed: p.update()
         if self.changed :
             pressed1, pressed2, pressed3 = pygame.mouse.get_pressed()
             if pressed1 or pressed2 or pressed3: return
+
+            if not suppress_undoable :
+                old_module = json.dumps(self.getSerializationMap())
+                undo_ix += 1
+                if len(undo_stack) > 0:
+                    del undo_stack[undo_ix:]
+                undo_stack.append(old_module)
+                undo_ix = len(undo_stack) - 1
+
+            suppress_undoable = False
+
             for c in self.connections :
                 c.close()
             self.connections = []
@@ -190,11 +208,12 @@ class Module(pygame.sprite.Sprite) :
             c.equalize()
 
     def save(self):
+        global undo_stack, undo_ix
+        serialized_module = self.getSerializationMap()
         if module_name.text != "":
             file = os.path.join("projects", module_name.text + ".json")
-            map = self.getSerializationMap()
             with open(file, 'w') as f:
-                json.dump(map, f)
+                json.dump(serialized_module, f)
                 f.close()
 
 halfGuage = int(guage/2)
@@ -1096,6 +1115,22 @@ def deleteSelected() :
     for h in currentModule.handles :
             if h.pipe.selected : currentModule.removePipe(h.pipe)
 
+def undo() :
+    global undo_stack, undo_ix, suppress_undoable
+    if len(undo_stack) > 0 and undo_ix >=0 and undo_ix < len(undo_stack) :
+        serialized_module = undo_stack[undo_ix]
+        suppress_undoable = True
+        currentModule.loadSerializationMap(json.loads(serialized_module))
+        undo_ix -= 1
+
+def redo() :
+    global undo_stack, undo_ix, suppress_undoable
+    if len(undo_stack) > 0 and undo_ix >= -1 and undo_ix < len(undo_stack) - 1 :
+        undo_ix += 1
+        serialized_module = undo_stack[undo_ix]
+        suppress_undoable = True
+        currentModule.loadSerializationMap(json.loads(serialized_module))
+
 def keyMap(key) :
     switcher = {
         ord('r'): rotateSelected,
@@ -1105,6 +1140,8 @@ def keyMap(key) :
         ord('d'): duplicateSelected,
         ord('c'): copySelected,
         ord('v'): pasteSelected,
+        ord('z'): undo,
+        ord('y'): redo,
         127: deleteSelected
     }
     func = switcher.get(key, lambda: "unknown command")
