@@ -1,5 +1,6 @@
 #copyright all rights reserved Lawrence Arnstein 2019
 #other components, connectivity, undo/redo, pressure modeling, impellers, etc.
+#todo: bug label interferes with handle on rotated Tap, Undo cross over load new model!!, 
 #todo: timer for handles, springs,name ports, abstract, select conflict with menu...disable mouse effects when in menu
 import os, sys
 import pygame
@@ -40,7 +41,7 @@ new_button = pg.elements.UIButton(relative_rect=pygame.Rect((screen_w-ui_width-1
                                             manager=manager)
 module_name = pg.elements.UITextEntryLine(relative_rect=pygame.Rect((10,10), (ui_width, ui_height)),
                                             manager=manager)
-speed_slider = pg.elements.UIHorizontalSlider(relative_rect=pygame.Rect((screen_w-ui_width-10,10+ui_space),(ui_width, ui_height)),value_range=tuple((0.05,0.9)),manager=manager,start_value=0.9)
+speed_slider = pg.elements.UIHorizontalSlider(relative_rect=pygame.Rect((screen_w-ui_width-10,10+ui_space),(ui_width, ui_height)),value_range=tuple((0.05,1.0)),manager=manager,start_value=0.9)
 module_list = None
 commands = ["duplicate      d","rotate         r","flip           f","copy           c","paste          v","grow           g","shrink         s"]
 command_list = pg.elements.UIDropDownMenu(options_list=commands, starting_option = "Commands", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,100),(ui_width, ui_height)))
@@ -173,8 +174,16 @@ class Module(pygame.sprite.Sprite) :
     def update(self):
         global undo_ix, undo_stack
         global suppress_undoable
+        input_pipes = []
+        output_pipes = []
         for p in self.pipes:
             if p.changed: p.update()
+            if p.io is not None :
+                if p.io : input_pipes.append(p)
+                else : output_pipes.append(p)
+        input_pipes.sort(key=lambda portname: portname.name)
+        output_pipes.sort(key=lambda portname: portname.name)
+        #print("found", len(input_pipes), "inputs", " and ", len(output_pipes), "outputs")
         if self.changed :
             pressed1, pressed2, pressed3 = pygame.mouse.get_pressed()
             if pressed1 or pressed2 or pressed3: return
@@ -199,6 +208,35 @@ class Module(pygame.sprite.Sprite) :
                         p.pipe.changed = True
                         q.pipe.changed = True
             self.changed = False
+
+            #construct sprite for the module abstract
+            boxw = 160
+            width = (segment/2) * 2 + boxw
+            maxports = max(len(input_pipes),len(output_pipes))
+            height = (guage * maxports) + halfGuage*(maxports+1)
+            abstract = pygame.Surface((width,height), pygame.SRCALPHA)
+            abstract_rect = pygame.Rect((segment/2,0), (segment/2,height))
+            pygame.gfxdraw.rectangle(abstract, (0,0,width,height), (180, 180, 180))
+            pygame.gfxdraw.box(abstract, (segment/2, 0, boxw, height), (180, 180, 180))
+            nameSurf = pygame.font.SysFont("Arial", 14).render(module_name.text, True, pygame.Color(255, 255, 255), None)
+            abstract.blit(nameSurf, (width/2-nameSurf.get_rect().width/2,height/2-nameSurf.get_rect().height/2))
+            starty = halfGuage
+            for i in input_pipes :
+                abstract.blit(full_pipe_img,(0,starty),pygame.Rect(0, 40, segment/2, 2*guage))
+                nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255),                                   None)
+                abstract.blit(nameSurf, (segment/2, starty))
+                starty += (guage+halfGuage)
+            starty = halfGuage
+            for i in output_pipes :
+                abstract.blit(full_pipe_img,(segment/2+boxw,starty),pygame.Rect(0, 40, segment/2, 2*guage))
+                nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255),                                   None)
+                abstract.blit(nameSurf, (segment/2+boxw-nameSurf.get_rect().width, starty))
+                starty += (guage+halfGuage)
+            self.image = abstract
+            self.rect = abstract.get_bounding_rect()
+            self.rect.center = ((screen_w - width/2) - 20, (screen_h - height/2) - 20)
+
+
             self.changeQueue = self.connections.copy()
             self.save()
 
@@ -252,9 +290,9 @@ def scalarToColor(p) :
   c2 = pygame.Color(255 - int(s*(255-127)), 255 - int(s*(255-205)), 255 - int(s*(255-255)));
   return c2
 
-def equalizePressure(p1,p2,aperture) :
-    deltap =  aperture * speed_slider.get_current_value() * (p1 - p2)
-    newp = round(100.0 * (p2 + deltap)) / 100.0
+def equalizePressure(inputPressure,currentPressure,aperture) :
+    deltap =  aperture * speed_slider.get_current_value() * (inputPressure - currentPressure)
+    newp = round(100.0 * (currentPressure + deltap)) / 100.0
     if deltap > 0 and newp > (0.9 * MAXPRESSURE): newp = MAXPRESSURE
     if deltap < 0 and newp < (0.1 * MAXPRESSURE): newp = 0
     return newp
@@ -325,10 +363,10 @@ class Connection() :
         self.sink.connected = self
 
     def equalize(self):
-        p1 = self.src.pipe.getPortPressure(self.src)
-        p2 = self.sink.pipe.getPortPressure(self.sink)
-        newp2 = equalizePressure(p1,p2,1.0)
-        if p1 != newp2 :
+        src = self.src.pipe.getPortPressure(self.src)
+        sink = self.sink.pipe.getPortPressure(self.sink)
+        newp2 = equalizePressure(src,sink,1.0)
+        if src != newp2 :
             self.sink.pipe.module.addQueue(self)
         self.sink.pipe.updatePressure(newp2,self.sink)
 
@@ -460,6 +498,7 @@ class Pipe(pygame.sprite.Sprite):
         self.inPressure = self.outPressure = 0
         self.impeller = None
         self.label = None
+        self.io = None
         self.name = ""
         m.addHandle(self.handle)
         m.addPort(self.inPort)
@@ -661,6 +700,7 @@ class Pump(Tap) :
         self.impeller = Impeller(self)
         if self.name == "" : self.name = "Input-"+str(self.id)
         self.label = Label(self)
+        self.io = IN
 
     def switch(self):
         self.inPressure = MAXPRESSURE - self.inPressure
@@ -674,6 +714,7 @@ class Nozzle(Pipe):
         self.impeller = Impeller(self)
         if self.name == "" : self.name = "Output-"+str(self.id)
         self.label = Label(self)
+        self.io = OUT
 
     def addSprites(self):
         img = nozzle_img.copy()
@@ -910,10 +951,13 @@ class Teesistor(Tee):
             if self.ctlPressure > 0 : self.pressureChanged(IN)
             self.ctlPressure = 0
         aperture = self.getAperture()
-        p1 = aperture * self.inPressure
-        p2 = self.outPressure
-        self.outPressure = equalizePressure(p2,p1,aperture)
-        if p2 != self.outPressure : self.pressureChanged(OUT)
+        src =  self.inPressure
+        if aperture == 0 :
+            src = 0
+            aperture = 1.0
+        sink = self.outPressure
+        self.outPressure = equalizePressure(src,sink,aperture)
+        if sink != self.outPressure : self.pressureChanged(OUT)
 
     def constructImage(self) :
         self.ctlPort.constructImage()
@@ -1000,6 +1044,7 @@ def moveSelected(deltaPos) :
         if (h.pipe.selected) : h.move(deltaPos)
 
 pipe_img, pipe_rect = load_image("halfpipe.png")
+full_pipe_img, full_pipe_rect = load_image("pipe.png")
 tee_img, tee_rect = load_image("tee.png")
 tap_img, tap_rect = load_image("tap.png")
 novalve_img, novalve_rect = load_image("NOvalve.png")
@@ -1274,6 +1319,9 @@ while 1:
         currentModule.impellers.draw(screen)
         currentModule.ports.draw(screen)
         currentModule.labels.draw(screen)
+        modules = pygame.sprite.RenderPlain()
+        modules.add(currentModule)
+        modules.draw(screen)
         if selectBox : pygame.gfxdraw.rectangle(screen, selectBox, (255, 255, 255))
     manager.draw_ui(screen)
     pygame.display.flip()
