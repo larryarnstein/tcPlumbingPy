@@ -1,7 +1,8 @@
 #copyright all rights reserved Lawrence Arnstein 2019
 #other components, connectivity, undo/redo, pressure modeling, impellers, etc.
-#todo: bug label interferes with handle on rotated Tap, Undo cross over load new model!!, 
+#todo: bug label interferes with handle on rotated Tap, Undo cross over load new model!!,
 #todo: timer for handles, springs,name ports, abstract, select conflict with menu...disable mouse effects when in menu
+#todo: move undo/redo stack into module. Add visbility control to Module. Load all modules at all times in project
 import os, sys
 import pygame
 import pygame.gfxdraw
@@ -43,7 +44,7 @@ module_name = pg.elements.UITextEntryLine(relative_rect=pygame.Rect((10,10), (ui
                                             manager=manager)
 speed_slider = pg.elements.UIHorizontalSlider(relative_rect=pygame.Rect((screen_w-ui_width-10,10+ui_space),(ui_width, ui_height)),value_range=tuple((0.05,1.0)),manager=manager,start_value=0.9)
 module_list = None
-commands = ["duplicate      d","rotate         r","flip           f","copy           c","paste          v","grow           g","shrink         s"]
+commands = ["duplicate      d","rotate         r","flip           f","copy           c","paste          v","grow           g","shrink         s","undo           z","redo           y"]
 command_list = pg.elements.UIDropDownMenu(options_list=commands, starting_option = "Commands", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,100),(ui_width, ui_height)))
 
 gui_elements = []
@@ -78,15 +79,7 @@ def load_image(name, colorkey=None):
         print('Cannot load image:', name)
         raise SystemExit(message)
     image = image.convert_alpha()
-#    if colorkey is not None:
-#        if colorkey is -1:
-#            colorkey = image.get_at((0, 0))
-#        image.set_colorkey(colorkey, pygame.RLEACCEL)
     return image, image.get_rect()
-
-undo_stack = []
-undo_ix = -1
-suppress_undoable = False
 
 class Module(pygame.sprite.Sprite) :
     def __init__(self):
@@ -98,7 +91,17 @@ class Module(pygame.sprite.Sprite) :
         self.connections = []
         self.impellers = pygame.sprite.RenderPlain()
         self.labels = pygame.sprite.RenderPlain()
-        self.changed = False;
+        self.changed = False
+        self.visible = True
+        self.suppress_undoable = False
+        self.initUndoStack()
+        self.buildAbstract()
+
+    def initUndoStack(self):
+        if not self.suppress_undoable :
+            self.undo_stack = []
+            self.undo_ix = -1
+            self.suppress_undoable = True
 
     def addQueue(self, c):
         if c not in self.changeQueue :
@@ -166,37 +169,46 @@ class Module(pygame.sprite.Sprite) :
         self.labels = pygame.sprite.RenderPlain()
         self.changeQueue = []
         self.connections = []
+        self.initUndoStack()
         components = datastore["components"]
         for c in components :
             self.loadComponent(c,0,0)
         self.changed = True
 
+    def undo(self):
+        if len(self.undo_stack) > 0 and self.undo_ix >= 0 and self.undo_ix < len(self.undo_stack):
+            serialized_module = self.undo_stack[self.undo_ix]
+            self.suppress_undoable = True
+            self.loadSerializationMap(json.loads(serialized_module))
+            self.undo_ix -= 1
+
+    def redo(self):
+        if len(self.undo_stack) > 0 and self.undo_ix >= -1 and self.undo_ix < len(self.undo_stack) - 1:
+            self.undo_ix += 1
+            serialized_module = self.undo_stack[self.undo_ix]
+            self.suppress_undoable = True
+            self.loadSerializationMap(json.loads(serialized_module))
+
     def update(self):
-        global undo_ix, undo_stack
-        global suppress_undoable
-        input_pipes = []
-        output_pipes = []
         for p in self.pipes:
-            if p.changed: p.update()
-            if p.io is not None :
-                if p.io : input_pipes.append(p)
-                else : output_pipes.append(p)
-        input_pipes.sort(key=lambda portname: portname.name)
-        output_pipes.sort(key=lambda portname: portname.name)
-        #print("found", len(input_pipes), "inputs", " and ", len(output_pipes), "outputs")
+            if p.changed:
+                p.update()
+                if p.io is not None : self.updateAbstract = True
         if self.changed :
+            self.updateAbstract = True
             pressed1, pressed2, pressed3 = pygame.mouse.get_pressed()
             if pressed1 or pressed2 or pressed3: return
 
-            if not suppress_undoable :
+            if not self.suppress_undoable :
                 old_module = json.dumps(self.getSerializationMap())
-                undo_ix += 1
-                if len(undo_stack) > 0:
-                    del undo_stack[undo_ix:]
-                undo_stack.append(old_module)
-                undo_ix = len(undo_stack) - 1
+                self.undo_ix += 1
+                if len(self.undo_stack) > 0:
+                    del self.undo_stack[self.undo_ix:]
+                self.undo_stack.append(old_module)
+                self.undo_ix = len(self.undo_stack) - 1
+                print("push ",self.undo_ix,len(self.undo_stack))
 
-            suppress_undoable = False
+            self.suppress_undoable = False
 
             for c in self.connections :
                 c.close()
@@ -208,35 +220,7 @@ class Module(pygame.sprite.Sprite) :
                         p.pipe.changed = True
                         q.pipe.changed = True
             self.changed = False
-
-            #construct sprite for the module abstract
-            boxw = 160
-            width = (segment/2) * 2 + boxw
-            maxports = max(len(input_pipes),len(output_pipes))
-            height = (guage * maxports) + halfGuage*(maxports+1)
-            abstract = pygame.Surface((width,height), pygame.SRCALPHA)
-            abstract_rect = pygame.Rect((segment/2,0), (segment/2,height))
-            pygame.gfxdraw.rectangle(abstract, (0,0,width,height), (180, 180, 180))
-            pygame.gfxdraw.box(abstract, (segment/2, 0, boxw, height), (180, 180, 180))
-            nameSurf = pygame.font.SysFont("Arial", 14).render(module_name.text, True, pygame.Color(255, 255, 255), None)
-            abstract.blit(nameSurf, (width/2-nameSurf.get_rect().width/2,height/2-nameSurf.get_rect().height/2))
-            starty = halfGuage
-            for i in input_pipes :
-                abstract.blit(full_pipe_img,(0,starty),pygame.Rect(0, 40, segment/2, 2*guage))
-                nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255),                                   None)
-                abstract.blit(nameSurf, (segment/2, starty))
-                starty += (guage+halfGuage)
-            starty = halfGuage
-            for i in output_pipes :
-                abstract.blit(full_pipe_img,(segment/2+boxw,starty),pygame.Rect(0, 40, segment/2, 2*guage))
-                nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255),                                   None)
-                abstract.blit(nameSurf, (segment/2+boxw-nameSurf.get_rect().width, starty))
-                starty += (guage+halfGuage)
-            self.image = abstract
-            self.rect = abstract.get_bounding_rect()
-            self.rect.center = ((screen_w - width/2) - 20, (screen_h - height/2) - 20)
-
-
+            self.updateAbstract = True
             self.changeQueue = self.connections.copy()
             self.save()
 
@@ -244,9 +228,52 @@ class Module(pygame.sprite.Sprite) :
         self.changeQueue = []
         for c in oldQ :
             c.equalize()
+        if self.updateAbstract and len(self.changeQueue) == 0 :
+            self.buildAbstract()
+
+    def buildAbstract(self):
+        # construct sprite for the module abstract
+        input_pipes = []
+        output_pipes = []
+        for p in self.pipes:
+            if p.io is not None:
+                if p.io == IN : input_pipes.append(p)
+                else : output_pipes.append(p)
+        input_pipes.sort(key=lambda portname: portname.name)
+        output_pipes.sort(key=lambda portname: portname.name)
+        boxw = 160
+        width = (segment / 2) * 2 + boxw
+        maxports = max(len(input_pipes), len(output_pipes))
+        height = (guage * maxports) + halfGuage * (maxports + 1)
+        abstract = pygame.Surface((width, height), pygame.SRCALPHA)
+        abstract_rect = pygame.Rect((segment / 2, 0), (segment / 2, height))
+        pygame.gfxdraw.rectangle(abstract, (0, 0, width, height), (180, 180, 180))
+        pygame.gfxdraw.box(abstract, (segment / 2, 0, boxw, height), (180, 180, 180))
+        nameSurf = pygame.font.SysFont("Arial", 14).render(module_name.text, True, pygame.Color(255, 255, 255), None)
+        abstract.blit(nameSurf,
+                      (width / 2 - nameSurf.get_rect().width / 2, height / 2 - nameSurf.get_rect().height / 2))
+        starty = halfGuage
+        for i in input_pipes:
+            img = full_pipe_img.copy()
+            img.fill(scalarToColor(i.outPressure), special_flags=pygame.BLEND_MULT)
+            abstract.blit(img, (0, starty), pygame.Rect(0, 40, segment / 2, 2 * guage))
+            nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255), None)
+            abstract.blit(nameSurf, (segment / 2, starty))
+            starty += (guage + halfGuage)
+        starty = halfGuage
+        for i in output_pipes:
+            img = full_pipe_img.copy()
+            img.fill(scalarToColor(i.inPressure), special_flags=pygame.BLEND_MULT)
+            abstract.blit(img, (segment / 2 + boxw, starty), pygame.Rect(0, 40, segment / 2, 2 * guage))
+            nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255), None)
+            abstract.blit(nameSurf, (segment / 2 + boxw - nameSurf.get_rect().width, starty))
+            starty += (guage + halfGuage)
+        self.image = abstract
+        self.rect = abstract.get_bounding_rect()
+        self.rect.center = ((screen_w - width / 2) - 20, (screen_h - height / 2) - 20)
+        self.updateAbstract = False
 
     def save(self):
-        global undo_stack, undo_ix
         serialized_module = self.getSerializationMap()
         if module_name.text != "":
             file = os.path.join("projects", module_name.text + ".json")
@@ -1161,20 +1188,10 @@ def deleteSelected() :
             if h.pipe.selected : currentModule.removePipe(h.pipe)
 
 def undo() :
-    global undo_stack, undo_ix, suppress_undoable
-    if len(undo_stack) > 0 and undo_ix >=0 and undo_ix < len(undo_stack) :
-        serialized_module = undo_stack[undo_ix]
-        suppress_undoable = True
-        currentModule.loadSerializationMap(json.loads(serialized_module))
-        undo_ix -= 1
+    currentModule.undo()
 
 def redo() :
-    global undo_stack, undo_ix, suppress_undoable
-    if len(undo_stack) > 0 and undo_ix >= -1 and undo_ix < len(undo_stack) - 1 :
-        undo_ix += 1
-        serialized_module = undo_stack[undo_ix]
-        suppress_undoable = True
-        currentModule.loadSerializationMap(json.loads(serialized_module))
+    currentModule.redo()
 
 def keyMap(key) :
     switcher = {
