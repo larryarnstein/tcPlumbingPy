@@ -25,6 +25,8 @@ downPos = None
 lastPos = None
 currentHandle = None
 currentImpeller = None
+currentModule = None
+loaded_modules = {}
 
 pygame.init()
 screen_w = 1200
@@ -52,21 +54,6 @@ gui_elements.append(module_name)
 gui_elements.append(command_list)
 gui_elements.append(new_button)
 gui_elements.append(speed_slider)
-
-def buildModuleMenu() :
-    global module_list
-    if module_list is not None :
-        module_list.kill()
-        gui_elements.remove(module_list)
-    mods = []
-    for file in os.listdir("projects"):
-        if file.endswith(".json"):
-            mods.append(file.split('.')[0])
-    module_list = pg.elements.UIDropDownMenu(options_list=mods, starting_option = "Load", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,70),(ui_width, ui_height)))
-    gui_elements.append(module_list)
-
-buildModuleMenu()
-
 
 if not os.path.exists('projects'):
     os.makedirs('projects')
@@ -99,9 +86,9 @@ class Module(pygame.sprite.Sprite) :
 
     def initUndoStack(self):
         if not self.suppress_undoable :
-            self.undo_stack = []
-            self.undo_ix = -1
-            self.suppress_undoable = True
+            self.undo_stack = [json.dumps(self.getSerializationMap())]
+            self.undo_ix = 0
+            self.suppress_undoable = False
 
     def addQueue(self, c):
         if c not in self.changeQueue :
@@ -176,14 +163,14 @@ class Module(pygame.sprite.Sprite) :
         self.changed = True
 
     def undo(self):
-        if len(self.undo_stack) > 0 and self.undo_ix >= 0 and self.undo_ix < len(self.undo_stack):
+        if len(self.undo_stack) >= self.undo_ix and self.undo_ix > 0:
+            self.undo_ix -= 1
             serialized_module = self.undo_stack[self.undo_ix]
             self.suppress_undoable = True
             self.loadSerializationMap(json.loads(serialized_module))
-            self.undo_ix -= 1
 
     def redo(self):
-        if len(self.undo_stack) > 0 and self.undo_ix >= -1 and self.undo_ix < len(self.undo_stack) - 1:
+        if self.undo_ix  < len(self.undo_stack) - 1 :
             self.undo_ix += 1
             serialized_module = self.undo_stack[self.undo_ix]
             self.suppress_undoable = True
@@ -238,7 +225,7 @@ class Module(pygame.sprite.Sprite) :
         for p in self.pipes:
             if p.io is not None:
                 if p.io == IN : input_pipes.append(p)
-                else : output_pipes.append(p)
+                elif p.io == OUT : output_pipes.append(p)
         input_pipes.sort(key=lambda portname: portname.name)
         output_pipes.sort(key=lambda portname: portname.name)
         boxw = 160
@@ -264,6 +251,7 @@ class Module(pygame.sprite.Sprite) :
         for i in output_pipes:
             img = full_pipe_img.copy()
             img.fill(scalarToColor(i.inPressure), special_flags=pygame.BLEND_MULT)
+            print("update output pressure is ", i, i.inPressure, i.outPressure)
             abstract.blit(img, (segment / 2 + boxw, starty), pygame.Rect(0, 40, segment / 2, 2 * guage))
             nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255), None)
             abstract.blit(nameSurf, (segment / 2 + boxw - nameSurf.get_rect().width, starty))
@@ -339,15 +327,12 @@ class Label(pygame.sprite.Sprite) :
         if self.pipe.angle == 3 :
             center = tuple(map(add, self.pipe.rect.center, (-guage, 0)))
 
-        self.font = pygame.font.SysFont("Arial", 14)
-        self.textSurf = self.font.render(self.pipe.name, True, pygame.Color(255,255,255), None)
+        font = pygame.font.SysFont("Arial", 14)
+        textSurf = font.render(self.pipe.name, True, pygame.Color(255,255,255), None)
         self.image = pygame.Surface((160, 20), pygame.SRCALPHA)
-        W = self.textSurf.get_width()
-        H = self.textSurf.get_height()
-        self.image.blit(self.textSurf, [0,0])
+        self.image.blit(textSurf, [0,0])
         self.rect = self.image.get_bounding_rect()
         self.rect.center = center
-
 
 MAXRATE = 30
 class Impeller(pygame.sprite.Sprite) :
@@ -404,9 +389,8 @@ class Connection() :
         self.sink.pipe.changed = True
 
     def getSerializationMap(self):
-        map = {}
-        return map
-
+        serialDict = {}
+        return serialDict
 
 class Port(pygame.sprite.Sprite) :
     def __init__(self, p):
@@ -416,7 +400,6 @@ class Port(pygame.sprite.Sprite) :
         self.alignedWithPipe = True
         self.direction = None
         self.id = None
-        #self.constructImage()
 
     def rotate(self):
         center = self.rect.center
@@ -575,6 +558,7 @@ class Pipe(pygame.sprite.Sprite):
             self.inPressure = p
         if oldp != self.inPressure :
             self.changed = True
+            self.transferPressure()
 
     def addSprites(self):
         img = pipe_img.copy()
@@ -746,6 +730,7 @@ class Nozzle(Pipe):
     def addSprites(self):
         img = nozzle_img.copy()
         img.fill(scalarToColor(self.outPressure), special_flags=pygame.BLEND_MULT)
+        print("drawing nozzle at pressure", self.outPressure)
         self.image.blit(img,(0,0))
 
     def scale(self,s):
@@ -897,6 +882,7 @@ class Join(Pipe):
             self.in2Pressure = p
             if oldp != self.in2Pressure:
                 self.changed = True
+        if self.changed : self.transferPressure()
 
     def transferPressure(self):
         if self.inPort.connected is None:
@@ -955,6 +941,7 @@ class Teesistor(Tee):
             self.ctlPressure = p
             if oldP != self.ctlPressure :
                 self.changed = True
+        if self.changed : self.transferPressure()
 
     def getAperture(self):
         if self.ctlPressure > 0.9 * MAXPRESSURE : return 1
@@ -1090,7 +1077,6 @@ screen.blit(background, (0, 0))
 pygame.display.flip()
 Clock = pygame.time.Clock()
 
-currentModule = None
 def makeNewModule() :
     m = Module()
     # Pipe(currentModule,200,200)
@@ -1103,15 +1089,8 @@ def makeNewModule() :
     Nozzle(m,530,600).constructImage()
     Bend(m,610,600).constructImage()
     Join(m,690,600).constructImage()
+    m.initUndoStack()
     return m
-
-def loadModule(name) :
-    file = os.path.join("projects", name+".json")
-    with open(file, 'r') as f:
-        datastore = json.load(f)
-        cm = Module()
-        cm.loadSerializationMap(datastore)
-        return cm
 
 def rotateSelected() :
     for h in currentModule.handles :
@@ -1143,6 +1122,31 @@ classes["Pump"] = Pump
 classes["Nozzle"] = Nozzle
 classes["Bend"] = Bend
 classes["Join"] = Join
+
+def loadModule(name) :
+    file = os.path.join("projects", name+".json")
+    with open(file, 'r') as f:
+        datastore = json.load(f)
+        cm = Module()
+        cm.loadSerializationMap(datastore)
+        return cm
+
+def buildModuleMenu() :
+    global module_list, loaded_modules
+    loaded_modules = {}
+    if module_list is not None :
+        module_list.kill()
+        gui_elements.remove(module_list)
+    mods = []
+    for file in os.listdir("projects"):
+        if file.endswith(".json"):
+            name = file.split('.')[0]
+            mods.append(name)
+            loaded_modules[name] = loadModule(name)
+    module_list = pg.elements.UIDropDownMenu(options_list=mods, starting_option = "Load", manager=manager,relative_rect=pygame.Rect((screen_w-ui_width-10,70),(ui_width, ui_height)))
+    gui_elements.append(module_list)
+
+buildModuleMenu()
 
 def duplicateSelected() :
     for h in currentModule.handles :
@@ -1240,8 +1244,9 @@ while 1:
                     module_name.set_text("")
             if event.user_type == 'ui_drop_down_menu_changed' :
                 if event.ui_element == module_list :
-                    currentModule = loadModule(module_list.selected_option)
+                    currentModule = loaded_modules[module_list.selected_option]
                     module_name.set_text(module_list.selected_option)
+                    module_name.unselect()
                     module_list.selected_option = "Load"
                 elif event.ui_element == command_list :
                     cmd = ord(command_list.selected_option[-1:])
@@ -1250,8 +1255,11 @@ while 1:
             if event.user_type == 'ui_text_entry_finished' :
                 if event.ui_element == module_name :
                     currentModule.save()
-                    buildModuleMenu()
+                    currentModule = loadModule(module_name.text)
+                    loaded_modules[module_name.text] = currentModule
+                    if module_name.text not in module_list.options_list : module_list.options_list.append(module_name.text)
                     module_list.selected_option = "Load"
+                    module_name.unselect()
                 if label_editor is not None and event.ui_element == label_editor :
                     if editing_pipe is not None :
                         editing_pipe.setName(label_editor.text)
