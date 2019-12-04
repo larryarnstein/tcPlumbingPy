@@ -3,6 +3,7 @@
 #todo: bug label interferes with handle on rotated Tap, Undo cross over load new model!!,
 #todo: timer for handles, springs,name ports, abstract, select conflict with menu...disable mouse effects when in menu
 #todo: move undo/redo stack into module. Add visbility control to Module. Load all modules at all times in project
+#todo: corner case: disconnecting a pump from an output causes pressure to change on update not on pressure equalize. So the abstract is wrong until moved. need away to push this back to module
 import os, sys
 import pygame
 import pygame.gfxdraw
@@ -82,7 +83,10 @@ class Module(pygame.sprite.Sprite) :
         self.visible = True
         self.suppress_undoable = False
         self.initUndoStack()
+        self.updateAbstractNow = False
+        self.upateAbstract = False
         self.buildAbstract()
+
 
     def initUndoStack(self):
         if not self.suppress_undoable :
@@ -90,9 +94,9 @@ class Module(pygame.sprite.Sprite) :
             self.undo_ix = 0
             self.suppress_undoable = False
 
-    def addQueue(self, c):
-        if c not in self.changeQueue :
-            self.changeQueue.append(c)
+    def addQueue(self, connection) :
+        if connection not in self.changeQueue :
+            self.changeQueue.append(connection)
 
     def addPipe(self, p):
         self.pipes.add(p)
@@ -193,7 +197,6 @@ class Module(pygame.sprite.Sprite) :
                     del self.undo_stack[self.undo_ix:]
                 self.undo_stack.append(old_module)
                 self.undo_ix = len(self.undo_stack) - 1
-                print("push ",self.undo_ix,len(self.undo_stack))
 
             self.suppress_undoable = False
 
@@ -215,8 +218,9 @@ class Module(pygame.sprite.Sprite) :
         self.changeQueue = []
         for c in oldQ :
             c.equalize()
-        if self.updateAbstract and len(self.changeQueue) == 0 :
+        if (self.updateAbstract and len(self.changeQueue) == 0) or self.updateAbstractNow :
             self.buildAbstract()
+            self.updateAbstractNow = False
 
     def buildAbstract(self):
         # construct sprite for the module abstract
@@ -251,7 +255,6 @@ class Module(pygame.sprite.Sprite) :
         for i in output_pipes:
             img = full_pipe_img.copy()
             img.fill(scalarToColor(i.inPressure), special_flags=pygame.BLEND_MULT)
-            print("update output pressure is ", i, i.inPressure, i.outPressure)
             abstract.blit(img, (segment / 2 + boxw, starty), pygame.Rect(0, 40, segment / 2, 2 * guage))
             nameSurf = pygame.font.SysFont("Arial", 12).render(i.name, True, pygame.Color(255, 255, 255), None)
             abstract.blit(nameSurf, (segment / 2 + boxw - nameSurf.get_rect().width, starty))
@@ -421,10 +424,13 @@ class InPort(Port) :
         self.direction = IN
 
     def constructImage(self):
+        global decorationsVisible
         if self.connected is None :
             self.image = disconnectedInPort
-        else :
+        elif decorationsVisible :
             self.image = ghostInPort
+        else :
+            self.image = invisibleDecoration
         self.rect = self.image.get_bounding_rect()
         self.rect.center = self.pipe.rect.center
 
@@ -443,8 +449,10 @@ class OutPort(Port) :
     def constructImage(self):
         if self.connected is None:
             self.image = disconnectedOutPort
-        else :
+        elif decorationsVisible :
             self.image = ghostOutPort
+        else :
+            self.image = invisibleDecoration
         self.rect = self.image.get_bounding_rect()
         self.rect.center = self.pipe.rect.center
 
@@ -471,7 +479,10 @@ class Handle(pygame.sprite.Sprite):
         self.image = overHandle
 
     def applyGhostHandle(self):
-        self.image = ghostHandle
+        if decorationsVisible :
+            self.image = ghostHandle
+        else :
+            self.image = invisibleDecoration
 
     def applySelectedHandle(self):
         self.image = selectedHandle
@@ -693,9 +704,15 @@ class Tap(Pipe) :
         self.inPressure = MAXPRESSURE
 
     def transferPressure(self):
+        old_pressure = self.outPressure
         self.outPressure = self.inPressure
-        if self.outPort is not None and self.outPort.connected is not None :
+        if self.outPort is not None and self.outPort.connected is not None and old_pressure != self.outPressure :
             self.module.addQueue(self.outPort.connected)
+            self.changed = True
+        if self.changed :
+            self.module.updateAbstract = True
+            if self.inPressure == 0.0 or self.inPressure == 255.0 :
+                self.module.updateAbstractNow = True
 
     def addSprites(self):
         img = tap_img.copy()
@@ -730,8 +747,14 @@ class Nozzle(Pipe):
     def addSprites(self):
         img = nozzle_img.copy()
         img.fill(scalarToColor(self.outPressure), special_flags=pygame.BLEND_MULT)
-        print("drawing nozzle at pressure", self.outPressure)
         self.image.blit(img,(0,0))
+
+    def transferPressure(self):
+        Pipe.transferPressure(self)
+        if self.changed :
+            self.module.updateAbstract = True
+            if self.inPressure == 0.0 or self.inPressure == 255.0 :
+                self.module.updateAbstractNow = True
 
     def scale(self,s):
         pass
@@ -980,12 +1003,28 @@ class Teesistor(Tee):
         self.ctlPort.rotate()
         Pipe.constructImage(self)
 
+    def drawSpring(self,compression,img):
+        fudge = 3
+        x0 = guage+fudge
+        y0 = halfGuage+fudge
+        yspace = 1.5*guage - compression
+
+        pygame.gfxdraw.line(img, x0, y0, x0+guage-2*fudge, int(y0+yspace/4), pygame.Color(255, 255, 255))
+        pygame.gfxdraw.line(img, x0+guage-2*fudge, int(y0+yspace/4), x0, int(y0+yspace/3),pygame.Color(255, 255, 255))
+        pygame.gfxdraw.line(img, x0, int(y0+yspace/3), x0+guage-2*fudge, int(y0+yspace/2),pygame.Color(255, 255, 255))
+        pygame.gfxdraw.line(img, x0+guage-2*fudge, int(y0+yspace/2), x0, int(y0+(2*yspace/3)),pygame.Color(255, 255, 255))
+        pygame.gfxdraw.line(img, x0, int(y0+(2*yspace/3)), x0+guage-2*fudge, int(y0+(3*yspace/4)),pygame.Color(255, 255, 255))
+        pygame.gfxdraw.line(img, x0+guage-2*fudge, int(y0+(3*yspace/4)), x0, int(y0+yspace),pygame.Color(255, 255, 255))
+
     def addSprites(self):
         Pipe.addSprites(self)
         img = teesistor_img.copy()
         img.fill(scalarToColor(self.ctlPressure),special_flags=BLEND_MULT)
+        a = self.getAperture()
+        compression = int(a * guage)
+        self.drawSpring(compression,img)
         self.image.blit(img,(0,0))
-        self.image.blit(ncvalve_img,(0,-self.getAperture()*guage))
+        self.image.blit(ncvalve_img,(0,-compression))
 
 class Teeverter(Teesistor):
     def __init__(self, m, x, y):  # call Sprite intializer
@@ -995,9 +1034,11 @@ class Teeverter(Teesistor):
         Pipe.addSprites(self)
         img = teesistor_img.copy()
         img.fill(scalarToColor(self.ctlPressure),special_flags=BLEND_MULT)
-        self.image.blit(img,(0,0))
         a = self.getAperture()
-        self.image.blit(novalve_img,(0,-(1-a)*guage))
+        compression = int((1 - a) * guage)
+        self.drawSpring(compression,img)
+        self.image.blit(img,(0,0))
+        self.image.blit(novalve_img,(0,-compression))
 
     def getAperture(self):
         if self.ctlPressure > 0.9 * MAXPRESSURE : return 0
@@ -1348,6 +1389,8 @@ while 1:
         modules.add(currentModule)
         modules.draw(screen)
         if selectBox : pygame.gfxdraw.rectangle(screen, selectBox, (255, 255, 255))
+        pygame.gfxdraw.rectangle(screen,(currentModule.rect.left,currentModule.rect.bottom + 5,currentModule.rect.width,10),(255,255,255))
+        pygame.gfxdraw.box(screen, (currentModule.rect.left,currentModule.rect.bottom + 5,currentModule.rect.width*(len(currentModule.changeQueue)/len(currentModule.ports)),10),(255,0,0))
     manager.draw_ui(screen)
     pygame.display.flip()
 
